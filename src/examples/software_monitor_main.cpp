@@ -32,7 +32,6 @@ int main() {
 
     config.enable_dpkg_snapshot = true;
     config.enable_rpm_snapshot = true;
-    config.debounce_ms = 1500;
 
     monitoring::SoftwareSource source(queue);
     source.SetMonitorConfig(config);
@@ -58,14 +57,12 @@ int main() {
                 std::static_pointer_cast<monitoring::SoftwareEvent>(event);
 
             std::cout << "event=" << monitoring::GetEventName(software_event->type)
-                      << " manager=" << software_event->package_manager
                       << " name=" << software_event->name
                       << " version=" << software_event->version
                       << " old_name=" << software_event->old_name
                       << " old_version=" << software_event->old_version
                       << " new_name=" << software_event->new_name
                       << " new_version=" << software_event->new_version
-                      << " arch=" << software_event->architecture
                       << " pid=" << software_event->pid
                       << " ppid=" << software_event->ppid
                       << std::endl;

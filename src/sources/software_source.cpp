@@ -118,9 +118,6 @@ void SoftwareSource::Run() {
             event->new_name = std::move(change.new_name);
             event->new_version = std::move(change.new_version);
 
-            event->package_manager = std::move(change.package_manager);
-            event->architecture = std::move(change.architecture);
-
             queue_->Push(std::move(event));
         }
     }

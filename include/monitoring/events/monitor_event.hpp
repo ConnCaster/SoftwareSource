@@ -113,9 +113,6 @@ namespace monitoring {
         std::string new_name;
         std::string new_version;
 
-        std::string package_manager;  // dpkg, rpm
-        std::string architecture;     // amd64, x86_64, noarch и т.п.
-
         SoftwareEvent() {
             src_type = SourceType::Software;
         }

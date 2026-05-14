@@ -78,10 +78,6 @@ void NormalizeConfig(SoftwareMonitorConfig& config) {
         std::unique(config.db_dirs.begin(), config.db_dirs.end()),
         config.db_dirs.end()
     );
-
-    if (config.debounce_ms < 0) {
-        config.debounce_ms = 0;
-    }
 }
 
 std::vector<std::string> Split(const std::string& value, char separator) {
@@ -366,10 +362,6 @@ int SoftwareMonitor::Init() {
     snapshot_ = std::move(initial_snapshot.packages);
     snapshot_initialized_ = true;
 
-    dirty_ = false;
-    last_pid_ = 0;
-    last_ppid_ = 0;
-
     return 0;
 }
 
@@ -390,10 +382,6 @@ void SoftwareMonitor::Shutdown() {
 
     snapshot_.clear();
     snapshot_initialized_ = false;
-
-    dirty_ = false;
-    last_pid_ = 0;
-    last_ppid_ = 0;
 }
 
 int SoftwareMonitor::MarkDbDirectory(const std::string& path) {
@@ -465,7 +453,6 @@ void SoftwareMonitor::PollOnce(
         const int saved_errno = errno;
 
         if (saved_errno == EINTR) {
-            TryEmitSnapshotDiff(changes);
             return;
         }
 
@@ -476,103 +463,24 @@ void SoftwareMonitor::PollOnce(
         return;
     }
 
-    if (poll_rc > 0) {
-        if (poll_fd.revents & (POLLERR | POLLHUP | POLLNVAL)) {
-            std::cerr << "fanotify fd error, revents=0x"
-                      << std::hex << poll_fd.revents
-                      << std::dec << std::endl;
-            return;
-        }
-
-        if (poll_fd.revents & POLLIN) {
-            DrainFanotifyEvents();
-        }
-    }
-
-    TryEmitSnapshotDiff(changes);
-}
-
-void SoftwareMonitor::DrainFanotifyEvents() {
-    alignas(fanotify_event_metadata) char buffer[kBufSize];
-
-    for (;;) {
-        const ssize_t len = read(fan_fd_, buffer, sizeof(buffer));
-
-        if (len < 0) {
-            if (errno == EAGAIN || errno == EINTR) {
-                return;
-            }
-
-            const int saved_errno = errno;
-
-            std::cerr << "fanotify read error: "
-                      << std::strerror(saved_errno)
-                      << std::endl;
-
-            return;
-        }
-
-        if (len == 0) {
-            return;
-        }
-
-        auto* metadata = reinterpret_cast<fanotify_event_metadata*>(buffer);
-        ssize_t remain = len;
-
-        while (FAN_EVENT_OK(metadata, remain)) {
-            if (metadata->vers != FANOTIFY_METADATA_VERSION) {
-                std::cerr << "fanotify metadata version mismatch" << std::endl;
-                return;
-            }
-
-            const int event_fd = metadata->fd;
-
-            if ((metadata->mask & FAN_Q_OVERFLOW) != 0) {
-                std::cerr << "fanotify software db queue overflow" << std::endl;
-                MarkDirty(metadata->pid);
-
-                if (event_fd >= 0) {
-                    close(event_fd);
-                }
-
-                metadata = FAN_EVENT_NEXT(metadata, remain);
-                continue;
-            }
-
-            if (IsSoftwareDbEvent(metadata->mask)) {
-                MarkDirty(metadata->pid);
-            }
-
-            if (event_fd >= 0) {
-                close(event_fd);
-            }
-
-            metadata = FAN_EVENT_NEXT(metadata, remain);
-        }
-    }
-}
-
-void SoftwareMonitor::MarkDirty(pid_t pid) {
-    dirty_ = true;
-    last_change_time_ = std::chrono::steady_clock::now();
-
-    last_pid_ = pid;
-    last_ppid_ = GetParentPid(pid);
-}
-
-void SoftwareMonitor::TryEmitSnapshotDiff(
-    std::vector<SoftwareRawEvent>& changes
-) {
-    if (!dirty_) {
+    if (poll_rc == 0) {
         return;
     }
 
-    const auto now = std::chrono::steady_clock::now();
-    const auto quiet_for = std::chrono::duration_cast<std::chrono::milliseconds>(
-        now - last_change_time_
-    );
+    if (poll_fd.revents & (POLLERR | POLLHUP | POLLNVAL)) {
+        std::cerr << "fanotify fd error, revents=0x"
+                  << std::hex << poll_fd.revents
+                  << std::dec << std::endl;
+        return;
+    }
 
-    if (quiet_for.count() < config_.debounce_ms) {
+    if ((poll_fd.revents & POLLIN) == 0) {
+        return;
+    }
+
+    const FanotifyTrigger trigger = DrainFanotifyEvents();
+
+    if (!trigger.triggered) {
         return;
     }
 
@@ -581,8 +489,6 @@ void SoftwareMonitor::TryEmitSnapshotDiff(
     if (!current_snapshot.ok) {
         std::cerr << "SoftwareMonitor: failed to read software snapshot after db change"
                   << std::endl;
-
-        dirty_ = false;
         return;
     }
 
@@ -595,12 +501,78 @@ void SoftwareMonitor::TryEmitSnapshotDiff(
     }
 
     for (std::size_t i = old_size; i < changes.size(); ++i) {
-        changes[i].pid = last_pid_;
-        changes[i].ppid = last_ppid_;
+        changes[i].pid = trigger.pid;
+        changes[i].ppid = trigger.ppid;
     }
 
     snapshot_ = std::move(current_snapshot.packages);
-    dirty_ = false;
+}
+
+SoftwareMonitor::FanotifyTrigger SoftwareMonitor::DrainFanotifyEvents() {
+    FanotifyTrigger trigger;
+
+    alignas(fanotify_event_metadata) char buffer[kBufSize];
+
+    for (;;) {
+        const ssize_t len = read(fan_fd_, buffer, sizeof(buffer));
+
+        if (len < 0) {
+            if (errno == EAGAIN || errno == EINTR) {
+                return trigger;
+            }
+
+            const int saved_errno = errno;
+
+            std::cerr << "fanotify read error: "
+                      << std::strerror(saved_errno)
+                      << std::endl;
+
+            return trigger;
+        }
+
+        if (len == 0) {
+            return trigger;
+        }
+
+        auto* metadata = reinterpret_cast<fanotify_event_metadata*>(buffer);
+        ssize_t remain = len;
+
+        while (FAN_EVENT_OK(metadata, remain)) {
+            if (metadata->vers != FANOTIFY_METADATA_VERSION) {
+                std::cerr << "fanotify metadata version mismatch" << std::endl;
+                return trigger;
+            }
+
+            const int event_fd = metadata->fd;
+
+            if ((metadata->mask & FAN_Q_OVERFLOW) != 0) {
+                std::cerr << "fanotify software db queue overflow" << std::endl;
+
+                trigger.triggered = true;
+                trigger.pid = metadata->pid;
+                trigger.ppid = GetParentPid(metadata->pid);
+
+                if (event_fd >= 0) {
+                    close(event_fd);
+                }
+
+                metadata = FAN_EVENT_NEXT(metadata, remain);
+                continue;
+            }
+
+            if (IsSoftwareDbEvent(metadata->mask)) {
+                trigger.triggered = true;
+                trigger.pid = metadata->pid;
+                trigger.ppid = GetParentPid(metadata->pid);
+            }
+
+            if (event_fd >= 0) {
+                close(event_fd);
+            }
+
+            metadata = FAN_EVENT_NEXT(metadata, remain);
+        }
+    }
 }
 
 SoftwareMonitor::SnapshotReadResult SoftwareMonitor::ReadInstalledSnapshot() const {
@@ -615,14 +587,13 @@ SoftwareMonitor::SnapshotReadResult SoftwareMonitor::ReadInstalledSnapshot() con
             for (const auto& line : command_result.lines) {
                 const auto columns = Split(line, '\t');
 
-                if (columns.size() < 4) {
+                if (columns.size() < 3) {
                     continue;
                 }
 
                 const std::string& name = columns[0];
                 const std::string& version = columns[1];
-                const std::string& architecture = columns[2];
-                const std::string& status = columns[3];
+                const std::string& status = columns[2];
 
                 /*
                  * "ii " означает:
@@ -638,10 +609,8 @@ SoftwareMonitor::SnapshotReadResult SoftwareMonitor::ReadInstalledSnapshot() con
                 }
 
                 SoftwarePackageInfo info;
-                info.manager = "dpkg";
                 info.name = name;
                 info.version = version;
-                info.architecture = architecture;
 
                 result.packages[MakePackageKey(info)] = std::move(info);
             }
@@ -657,7 +626,7 @@ SoftwareMonitor::SnapshotReadResult SoftwareMonitor::ReadInstalledSnapshot() con
             for (const auto& line : command_result.lines) {
                 const auto columns = Split(line, '\t');
 
-                if (columns.size() < 5) {
+                if (columns.size() < 4) {
                     continue;
                 }
 
@@ -665,17 +634,14 @@ SoftwareMonitor::SnapshotReadResult SoftwareMonitor::ReadInstalledSnapshot() con
                 const std::string& epoch = columns[1];
                 const std::string& rpm_version = columns[2];
                 const std::string& release = columns[3];
-                const std::string& architecture = columns[4];
 
                 if (name.empty() || rpm_version.empty()) {
                     continue;
                 }
 
                 SoftwarePackageInfo info;
-                info.manager = "rpm";
                 info.name = name;
                 info.version = BuildRpmVersion(epoch, rpm_version, release);
-                info.architecture = architecture;
 
                 result.packages[MakePackageKey(info)] = std::move(info);
             }
@@ -685,8 +651,7 @@ SoftwareMonitor::SnapshotReadResult SoftwareMonitor::ReadInstalledSnapshot() con
     return result;
 }
 
-void SoftwareMonitor::DiffSnapshots(
-    const Snapshot& old_snapshot,
+void SoftwareMonitor::DiffSnapshots(const Snapshot& old_snapshot,
     const Snapshot& new_snapshot,
     std::vector<SoftwareRawEvent>& changes
 ) const {
@@ -709,7 +674,7 @@ void SoftwareMonitor::DiffSnapshots(
     std::vector<bool> added_used(added.size(), false);
 
     /*
-     * Если исчезла версия A и появилась версия B того же manager+name+arch,
+     * Если исчезла версия A и появилась версия B того же имени,
      * считаем это обновлением.
      */
     for (std::size_t i = 0; i < removed.size(); ++i) {
@@ -734,9 +699,6 @@ void SoftwareMonitor::DiffSnapshots(
             event.new_name = added[j].name;
             event.new_version = added[j].version;
 
-            event.architecture = added[j].architecture;
-            event.package_manager = added[j].manager;
-
             changes.push_back(std::move(event));
 
             removed_used[i] = true;
@@ -759,9 +721,6 @@ void SoftwareMonitor::DiffSnapshots(
         event.new_name = added[i].name;
         event.new_version = added[i].version;
 
-        event.architecture = added[i].architecture;
-        event.package_manager = added[i].manager;
-
         changes.push_back(std::move(event));
     }
 
@@ -779,19 +738,16 @@ void SoftwareMonitor::DiffSnapshots(
         event.old_name = removed[i].name;
         event.old_version = removed[i].version;
 
-        event.architecture = removed[i].architecture;
-        event.package_manager = removed[i].manager;
-
         changes.push_back(std::move(event));
     }
 }
 
 std::string SoftwareMonitor::MakeIdentityKey(const SoftwarePackageInfo& info) {
-    return info.manager + '\t' + info.name + '\t' + info.architecture;
+    return info.name;
 }
 
 std::string SoftwareMonitor::MakePackageKey(const SoftwarePackageInfo& info) {
-    return MakeIdentityKey(info) + '\t' + info.version;
+    return info.name + '\t' + info.version;
 }
 
 }  // namespace monitoring
