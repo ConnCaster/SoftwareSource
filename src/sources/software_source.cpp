@@ -60,10 +60,7 @@ SoftwareSource::SoftwareSource(std::shared_ptr<IEventQueue> queue)
     std::cout << "SoftwareSource: constructed\n";
 }
 
-SoftwareSource::SoftwareSource(
-    std::shared_ptr<IEventQueue> queue,
-    SoftwareMonitorConfig config
-)
+SoftwareSource::SoftwareSource(std::shared_ptr<IEventQueue> queue,SoftwareMonitorConfig config)
     : ThreadedSource(std::move(queue)),
       monitor_(std::make_unique<SoftwareMonitor>(std::move(config))) {
     std::cout << "SoftwareSource: constructed with custom config\n";
@@ -76,10 +73,6 @@ void SoftwareSource::SetMonitorConfig(const SoftwareMonitorConfig& config) {
     }
 
     monitor_->SetConfig(config);
-}
-
-SoftwareMonitorConfig SoftwareSource::GetMonitorConfig() const {
-    return monitor_->GetConfig();
 }
 
 SoftwareSource::~SoftwareSource() {

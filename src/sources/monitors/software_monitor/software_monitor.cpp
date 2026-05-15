@@ -188,11 +188,7 @@ CommandResult RunCommandLines(const std::string& command) {
     return result;
 }
 
-std::string BuildRpmVersion(
-    const std::string& epoch,
-    const std::string& version,
-    const std::string& release
-) {
+std::string BuildRpmVersion(const std::string& epoch, const std::string& version, const std::string& release) {
     std::string result = version;
 
     if (!release.empty()) {
@@ -246,34 +242,6 @@ bool SoftwareMonitor::SetConfig(SoftwareMonitorConfig config) {
     return true;
 }
 
-bool SoftwareMonitor::AddDbDirectory(std::string path) {
-    if (fan_fd_ >= 0) {
-        std::cerr << "SoftwareMonitor::AddDbDirectory() must be called before Init()"
-                  << std::endl;
-        return false;
-    }
-
-    path = NormalizeDirPath(std::move(path));
-
-    if (path.empty()) {
-        return false;
-    }
-
-    if (std::find(config_.db_dirs.begin(), config_.db_dirs.end(), path) !=
-        config_.db_dirs.end()) {
-        return true;
-    }
-
-    config_.db_dirs.push_back(std::move(path));
-    NormalizeConfig(config_);
-
-    return true;
-}
-
-SoftwareMonitorConfig SoftwareMonitor::GetConfig() const {
-    return config_;
-}
-
 int SoftwareMonitor::Init() {
     Shutdown();
 
@@ -296,7 +264,6 @@ int SoftwareMonitor::Init() {
         FAN_CLOEXEC |
         FAN_NONBLOCK;
 
-#if defined(FAN_REPORT_DIR_FID) && defined(FAN_REPORT_NAME)
     report_name_mode_ = true;
 
     fan_fd_ = fanotify_init(
@@ -312,14 +279,7 @@ int SoftwareMonitor::Init() {
             O_RDONLY | O_CLOEXEC | O_LARGEFILE
         );
     }
-#else
-    report_name_mode_ = false;
 
-    fan_fd_ = fanotify_init(
-        kBaseInitFlags,
-        O_RDONLY | O_CLOEXEC | O_LARGEFILE
-    );
-#endif
 
     if (fan_fd_ < 0) {
         const int saved_errno = errno;
@@ -434,10 +394,7 @@ int SoftwareMonitor::MarkDbDirectory(const std::string& path) {
     return 0;
 }
 
-void SoftwareMonitor::PollOnce(
-    std::vector<SoftwareRawEvent>& changes,
-    int timeout_ms
-) {
+void SoftwareMonitor::PollOnce(std::vector<SoftwareRawEvent>& changes, int timeout_ms) {
     if (fan_fd_ < 0) {
         std::cerr << "fanotify descriptor is not initialized" << std::endl;
         return;
@@ -651,10 +608,7 @@ SoftwareMonitor::SnapshotReadResult SoftwareMonitor::ReadInstalledSnapshot() con
     return result;
 }
 
-void SoftwareMonitor::DiffSnapshots(const Snapshot& old_snapshot,
-    const Snapshot& new_snapshot,
-    std::vector<SoftwareRawEvent>& changes
-) const {
+void SoftwareMonitor::DiffSnapshots(const Snapshot& old_snapshot, const Snapshot& new_snapshot, std::vector<SoftwareRawEvent>& changes) const {
     std::vector<SoftwarePackageInfo> removed;
     std::vector<SoftwarePackageInfo> added;
 
